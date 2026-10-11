@@ -1,0 +1,15 @@
+backend/tests
+backend/*.db
+backend/*.db-*
+backend/.env
+backend/run.py
+backend/__pycache__
+**/__pycache__
+**/*.pyc
+frontend/node_modules
+frontend/dist
+frontend/src/**/*.test.*
+*.zip
+.env
+.env.*
+!.env.example

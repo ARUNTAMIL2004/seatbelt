@@ -1,0 +1,3 @@
+# Local backend runtime (same as the root requirements.txt used by Vercel) + dev server
+-r ../requirements.txt
+uvicorn[standard]>=0.30
