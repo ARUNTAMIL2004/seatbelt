@@ -23,55 +23,112 @@ const DEMO_PRESETS = [
 
 type ScannerHandle = { isScanning: boolean; stop: () => Promise<void>; clear: () => void };
 
-const Body: React.FC<Props> = ({ onClose, onScanResult, currentLang = 'en' }) => {
+const Body: React.FC<Props> = ({ isOpen, onClose, onScanResult, currentLang = 'en' }) => {
   const t = translations[currentLang];
   const [manualCode, setManualCode] = useState('');
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+
+  /**
+   * scannerRef  – the live html5-qrcode instance (null when not started).
+   * stoppingRef – mutex: prevents concurrent stopCamera() calls from racing.
+   *   Both finish() and the cleanup-on-unmount effect call stopCamera(); without
+   *   this guard the scanner gets double-stopped, throws internally, and leaves
+   *   camera tracks open in the OS.
+   * doneRef     – set to true after the first successful scan so that
+   *   html5-qrcode per-frame callbacks cannot fire finish() twice.
+   *   MUST be reset every time the modal re-opens so subsequent scans work.
+   */
   const scannerRef = useRef<ScannerHandle | null>(null);
+  const stoppingRef = useRef(false);
   const doneRef = useRef(false);
 
-  const stopCamera = useCallback(async () => {
-    const s = scannerRef.current;
-    scannerRef.current = null;
-    if (s) {
-      try { if (s.isScanning) await s.stop(); } catch { /* already stopped */ }
-      try { s.clear(); } catch { /* element gone */ }
+  // Reset the one-shot guard each time the modal opens so re-use works correctly.
+  useEffect(() => {
+    if (isOpen) {
+      doneRef.current = false;
     }
+  }, [isOpen]);
+
+  /**
+   * stopCamera – idempotent, race-safe camera teardown.
+   * stoppingRef acts as a mutex: only one concurrent call proceeds.
+   * scannerRef is nulled before async work so concurrent callers bail early.
+   */
+  const stopCamera = useCallback(async () => {
+    if (stoppingRef.current) return;   // mutex: already being torn down
+    const s = scannerRef.current;
+    if (!s) return;                    // never started or already stopped
+
+    stoppingRef.current = true;
+    scannerRef.current = null;
+
+    try { if (s.isScanning) await s.stop(); } catch { /* already stopped internally */ }
+    try { s.clear(); } catch { /* DOM element may be gone during unmount */ }
+
     setCameraActive(false);
+    stoppingRef.current = false;
   }, []);
 
-  // release the camera when the dialog closes / unmounts
+  // Release the camera when the modal closes or the component unmounts.
   useEffect(() => () => { void stopCamera(); }, [stopCamera]);
 
-  const finish = useCallback((code: string) => {
+  /**
+   * finish – called on a successful QR decode (or a demo / manual shortcut).
+   *
+   * Made async so that onScanResult / onClose are only called AFTER the camera
+   * has fully stopped.  This prevents the Modal's null-render (triggered by
+   * onClose -> isOpen=false) from firing a second concurrent stopCamera().
+   */
+  const finish = useCallback(async (code: string) => {
     if (doneRef.current) return;
     doneRef.current = true;
     soundEffects.playScanBeep();
-    void stopCamera();
+    await stopCamera();
     onScanResult(code.trim());
     onClose();
   }, [onClose, onScanResult, stopCamera]);
 
   const startCamera = async () => {
     setCameraError(null);
+    doneRef.current = false;  // allow a fresh scan after manual stop + re-start
     try {
       const { Html5Qrcode } = await import('html5-qrcode');
       const scanner = new Html5Qrcode('qr-reader');
       scannerRef.current = scanner as unknown as ScannerHandle;
-      await scanner.start({ facingMode: 'environment' }, { fps: 12, qrbox: { width: 220, height: 220 } },
-        (decoded) => finish(decoded), () => { /* per-frame decode misses are normal */ });
+
+      await scanner.start(
+        { facingMode: 'environment' },
+        { fps: 12, qrbox: { width: 220, height: 220 } },
+        // html5-qrcode does not await the success callback; fire-and-forget is
+        // safe because finish() is idempotent via doneRef.
+        (decoded) => { void finish(decoded); },
+        () => { /* per-frame decode misses are normal – do not stop camera */ },
+      );
+
       setCameraActive(true);
-    } catch {
+    } catch (err) {
       scannerRef.current = null;
-      setCameraError('Camera access was not permitted or no camera was found (camera needs HTTPS). Use the manual input instead.');
+      stoppingRef.current = false;
+
+      const msg = err instanceof Error ? err.message : String(err);
+      const isPermission = /permission|denied|notallowed/i.test(msg);
+      const isNotFound = /notfound|no.*camera|overconstrained/i.test(msg);
+
+      if (isPermission) {
+        setCameraError('Camera permission was denied. Please allow camera access in your browser settings and try again.');
+      } else if (isNotFound) {
+        setCameraError('No camera was found on this device. Use the manual input below instead.');
+      } else {
+        setCameraError('Camera could not be started (camera requires HTTPS on most browsers). Use the manual input below instead.');
+      }
       setCameraActive(false);
     }
   };
 
   const submitManual = (e: React.FormEvent) => {
     e.preventDefault();
-    if (manualCode.trim()) finish(manualCode);
+    if (manualCode.trim()) void finish(manualCode);
   };
 
   return (
@@ -104,7 +161,7 @@ const Body: React.FC<Props> = ({ onClose, onScanResult, currentLang = 'en' }) =>
           <p className="text-slate-400 font-mono uppercase text-[11px] mb-1.5 flex items-center gap-1.5"><Sparkles className="w-3.5 h-3.5 text-cyan-400" aria-hidden="true" />Demo seatbelts (one-click scan)</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {DEMO_PRESETS.map((p) => (
-              <button key={p.qr} type="button" onClick={() => finish(p.qr)} className="p-2.5 rounded-lg bg-slate-900/70 border border-slate-800 hover:border-cyan-400 text-left transition-all min-w-0">
+              <button key={p.qr} type="button" onClick={() => void finish(p.qr)} className="p-2.5 rounded-lg bg-slate-900/70 border border-slate-800 hover:border-cyan-400 text-left transition-all min-w-0">
                 <div className="font-mono font-bold text-xs text-cyan-300">{p.qr}</div>
                 <div className="text-[10px] text-slate-400 mt-0.5 truncate">{p.label}</div>
               </button>
